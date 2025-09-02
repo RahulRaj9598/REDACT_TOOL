@@ -1,8 +1,8 @@
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-from werkzeug.utils import secure_filename
 import os
 import json
+from werkzeug.utils import secure_filename
 from json import dump
 import requests
 
@@ -85,6 +85,9 @@ def redact_document():
         return send_file(pdf_output_path, as_attachment=True, download_name="final_output.pdf")
 
     except Exception as e:
+        import traceback
+        print(f"ERROR: {e}")
+        print(f"TRACEBACK: {traceback.format_exc()}")
         return jsonify({"message": f"Error processing file: {e}"}), 500
     finally:
         os.remove(file_path)
@@ -142,7 +145,9 @@ def send_to_redaction_process(json_path):
             response.raise_for_status()
             return response.json()  # assuming the second API returns JSON
         except requests.RequestException as e:
-            print(e)
+            print(f"REDACTION ERROR: {e}")
+            import traceback
+            print(f"REDACTION TRACEBACK: {traceback.format_exc()}")
             raise Exception(f"Error in redaction process: {e}")
 
 
@@ -231,4 +236,4 @@ def redact_document_all():
 
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    app.run(debug=True, host="0.0.0.0", port=8003)

@@ -112,12 +112,12 @@ function Redact_doc() {
       let response;
       // Check if the file is an image or other type
       if (fileType === "image") {
-        response = await fetch("http://localhost:5000/redact-img", {
+        response = await fetch("http://localhost:8003/redact-img", {
           method: "POST",
           body: formData,
         });
       } else {
-        response = await fetch("http://localhost:5000/redact-document", {
+        response = await fetch("http://localhost:8003/redact-document", {
           method: "POST",
           body: formData,
         });

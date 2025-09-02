@@ -1,12 +1,15 @@
 import cv2
 import numpy as np
-from paddleocr import PaddleOCR
+import pytesseract
 from PIL import Image
 from fpdf import FPDF
 import matplotlib.pyplot as plt
 import os
 import json
 from PIL import ImageEnhance, ImageFilter
+
+# Set TESSDATA_PREFIX for pytesseract
+os.environ['TESSDATA_PREFIX'] = '/opt/homebrew/Cellar/tesseract/5.5.1/share/tessdata'
 
 # Base class for document processing
 class DocumentProcessor:
@@ -41,9 +44,10 @@ class DocumentProcessor:
 
 # Subclass for image-specific processing
 class ImageProcessor(DocumentProcessor):
-    def __init__(self, ocr_language="en"):
+    def __init__(self, ocr_language="eng"):
         super().__init__()
-        self.ocr = PaddleOCR(use_angle_cls=True, lang=ocr_language)
+        # Initialize pytesseract with the same language support
+        self.ocr_language = ocr_language
 
     def process_image(self, image_path):
         # Load and preprocess image
@@ -53,8 +57,8 @@ class ImageProcessor(DocumentProcessor):
 
         self.extract_metadata(image_path)
 
-        # Perform OCR
-        result = self.ocr.ocr(image_path, cls=True)
+        # Perform OCR with pytesseract - keeping the same logic structure
+        result = self._perform_tesseract_ocr(image_path)
         self._process_text(image, result)
 
         # Detect shapes
@@ -64,8 +68,39 @@ class ImageProcessor(DocumentProcessor):
 
         return image
 
+    def _perform_tesseract_ocr(self, image_path):
+        """Perform OCR using pytesseract and return results in the same format as original logic"""
+        # Read image
+        image = cv2.imread(image_path)
+        
+        # Get OCR data with bounding boxes
+        ocr_data = pytesseract.image_to_data(image, lang=self.ocr_language, output_type=pytesseract.Output.DICT)
+        
+        # Convert to the same format as original logic
+        result = []
+        for i in range(len(ocr_data['text'])):
+            if ocr_data['conf'][i] > 0 and ocr_data['text'][i].strip():  # Only process text with confidence > 0
+                x = ocr_data['left'][i]
+                y = ocr_data['top'][i]
+                w = ocr_data['width'][i]
+                h = ocr_data['height'][i]
+                
+                # Create bounding box in the same format as original
+                box = np.array([
+                    [x, y],
+                    [x + w, y],
+                    [x + w, y + h],
+                    [x, y + h]
+                ], dtype=np.int32)
+                
+                result.append([box, [ocr_data['text'][i]]])
+        
+        return [result]  # Wrap in list to match original format
+
     def _process_text(self, image, ocr_result):
         available_font = [8,14,18,24,32,40,48]
+        
+        # Process OCR results in the same format as original logic
         for idx in range(len(ocr_result)):
             for line in ocr_result[idx]:
                 # Extract bounding box and text
@@ -172,6 +207,13 @@ class ImageProcessor(DocumentProcessor):
         scale_factor = min(pdf_width / self.metadata["width"], pdf_height / self.metadata["height"])
         print(scale_factor)
         pdf = FPDF(unit="pt", format=[pdf_width, pdf_height])
+        # Add Unicode support for fpdf2
+        try:
+            pdf.add_font("DejaVu", "", "/System/Library/Fonts/Supplemental/DejaVuSans.ttf", uni=True)
+            pdf.set_font("DejaVu", size=12)
+        except:
+            # Fallback to default font if DejaVu not available
+            pdf.set_font("Arial", size=12)
         pdf.add_page()
 
         # Draw visual elements
@@ -195,24 +237,63 @@ class ImageProcessor(DocumentProcessor):
             pdf.image(temp_path, x, y, w, h)
             os.remove(temp_path)
 
-        # Draw text
-        for text in self.text_objects:
-            box = text["coordinates"]
-            x = box[0][0] * self.metadata["width"] * scale_factor
-            y = box[0][1] * self.metadata["height"] * scale_factor
-            pdf.set_xy(x, y)
-            print(f"x={x} , y={y}")
-            pdf.set_font("Arial", size=text["font_size"], style="B" if text["font_weight"] > 0.5 else "")
-            pdf.multi_cell(0, 10, text["content"], border=0)
+        # Draw text (group by lines for better alignment)
+        # Group tokens into visual lines using Y proximity
+        line_tolerance = 0.012  # relative tolerance on normalized Y to group words
+        lines = []
+        for obj in self.text_objects:
+            box = obj["coordinates"]
+            x_norm = box[0][0]
+            y_norm = box[0][1]
+            placed = False
+            for line in lines:
+                if abs(y_norm - line["y"]) <= line_tolerance:
+                    line["items"].append({
+                        "x": x_norm,
+                        "text": obj["content"],
+                        "font_size": obj["font_size"],
+                        "font_weight": obj["font_weight"],
+                    })
+                    # update running average Y
+                    line["y"] = (line["y"] + y_norm) / 2
+                    placed = True
+                    break
+            if not placed:
+                lines.append({
+                    "y": y_norm,
+                    "items": [{
+                        "x": x_norm,
+                        "text": obj["content"],
+                        "font_size": obj["font_size"],
+                        "font_weight": obj["font_weight"],
+                    }]
+                })
 
+        # Render each line left-to-right at the first token X
+        for line in sorted(lines, key=lambda l: l["y"]):
+            items = sorted(line["items"], key=lambda i: i["x"])
+            x_start = items[0]["x"] * self.metadata["width"] * scale_factor
+            y_start = line["y"] * self.metadata["height"] * scale_factor
+            text_line = " ".join(i["text"] for i in items)
+            avg_font = int(round(sum(i["font_size"] for i in items) / max(1, len(items))))
+            bold = "B" if (sum(i["font_weight"] for i in items) / max(1, len(items))) > 0.5 else ""
+            try:
+                pdf.set_font("DejaVu", size=avg_font, style=bold)
+                pdf.text(x_start, y_start + avg_font, text_line)
+            except:
+                pdf.set_font("Arial", size=avg_font, style=bold)
+                clean_text = text_line.replace('\u2019', "'").replace('\u2018', "'").replace('\u201c', '"').replace('\u201d', '"').replace('\u2014', '-')
+                pdf.text(x_start, y_start + avg_font, clean_text)
+         
         pdf.output(output_pdf_path)
         print(f"PDF saved to {output_pdf_path}")
 
 
-# # Example usage
-# if __name__ == "__main__":
-#     processor = ImageProcessor()
-#     processed_image = processor.process_image("file.jpeg")
-#     json = processor.save_results("output.json")
-#     print(json)
-#     processor.reconstruct_pdf("output.pdf", "telea_transparent.png")
+#Example usage
+
+if __name__ == "__main__":
+    processor = ImageProcessor()
+    processed_image = processor.process_image("formal.png")
+    json = processor.save_results("output.json")
+    # print(json)
+    # processor.reconstruct_pdf("output.pdf", "telea_transparent.png")
